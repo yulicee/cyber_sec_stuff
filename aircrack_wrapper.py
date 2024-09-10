@@ -125,7 +125,7 @@ class AircrackNGWrapper:
 
     def list_networks(self):
         logging.info("Scanning for networks...")
-        cmd = ['sudo', 'airodump-ng', '--band', 'g', '--output-format', 'csv', '--write', 'temp_scan', self.interface]
+        cmd = ['sudo', 'airodump-ng', '--output-format', 'csv', '--write', 'temp_scan', self.interface]
         logging.debug(f"Command to run: {' '.join(cmd)}")
         result = self.runner.run(cmd, timeout=60)  # Increased timeout for scanning
         if result and result.returncode == 0:
