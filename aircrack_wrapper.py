@@ -74,7 +74,7 @@ class AircrackNGWrapper:
         self.handshake_timeout = 120  # Timeout in seconds for handshake capture
 
     def configure(self, args):
-        self.interface = args.interface or self.select_option("Select the interface to use", self.get_interfaces())
+        self.interface = args.interface or self.auto_select_interface()
         self.bssid = args.bssid or self.get_input("Enter the BSSID of the target network")
         self.channel = args.channel or self.get_input("Enter the channel of the target network")
         self.capture_file = self.get_input("Enter the filename to save the capture", "capture")
@@ -90,6 +90,14 @@ class AircrackNGWrapper:
 
         # Validate file paths
         self.validate_paths()
+
+    def auto_select_interface(self):
+        interfaces = self.get_interfaces()
+        if interfaces:
+            return interfaces[0]  # Automatically select the first available interface
+        else:
+            logging.error("No wireless interfaces found.")
+            exit(1)
 
     def validate_paths(self):
         if self.wordlist_path and not Path(self.wordlist_path).is_file():
@@ -152,7 +160,6 @@ class AircrackNGWrapper:
         return result and "1 handshake" in result.stdout
 
     def capture_clients(self):
-        """Capture connected clients from the airodump-ng output."""
         cmd = ['sudo', 'airodump-ng', '--bssid', self.bssid, '--channel', self.channel, self.interface]
         result = self.runner.run(cmd, timeout=30)  # Increased timeout
         if result:
