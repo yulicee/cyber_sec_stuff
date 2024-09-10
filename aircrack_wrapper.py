@@ -123,10 +123,12 @@ class AircrackNGWrapper:
 
     def verify_monitor_mode(self):
         result = self.runner.run(['iwconfig'])
-        if result and f"{self.interface}mon" in result.stdout:
-            self.interface += 'mon'
+        if result and (f"{self.interface}mon" in result.stdout or "Mode:Monitor" in result.stdout):
+            if not "mon" in self.interface:
+                self.interface += 'mon'
             return True
         return False
+
 
     def capture_handshake(self):
         cmd = self.build_airodump_cmd()
